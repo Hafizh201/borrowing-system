@@ -29,6 +29,7 @@ function parseDate(value) {
 
   const fallback = new Date(text);
   if (Number.isNaN(fallback.getTime())) return null;
+
   return fallback;
 }
 
@@ -56,10 +57,6 @@ function normalizeWaNumber(number) {
   }
 
   return value;
-}
-
-function toWhatsappJid(number) {
-  return `${normalizeWaNumber(number)}@s.whatsapp.net`;
 }
 
 function isReturnedAfter(riwayatRows, pinjamRow) {
@@ -123,7 +120,7 @@ async function fetchAppsScript(mode) {
   const baseUrl = process.env.APPS_SCRIPT_URL;
 
   if (!baseUrl) {
-    throw new Error("APPS_SCRIPT_URL belum diisi di .env.local");
+    throw new Error("APPS_SCRIPT_URL belum diisi di Environment Variables");
   }
 
   const url = `${baseUrl}?mode=${encodeURIComponent(mode)}`;
@@ -141,40 +138,30 @@ async function fetchAppsScript(mode) {
   return json.data || [];
 }
 
-async function sendFlowKirim({ target, message }) {
-  const token = process.env.FLOWKIRIM_TOKEN;
-  const sessionId = process.env.FLOWKIRIM_SESSION_ID;
-
-  const endpoint =
-    process.env.FLOWKIRIM_API_URL ||
-    "https://scan.flowkirim.com/api/whatsapp/messages/text";
+async function sendFonnte({ target, message }) {
+  const token = process.env.FONNTE_TOKEN;
+  const endpoint = process.env.FONNTE_API_URL || "https://api.fonnte.com/send";
 
   if (!token) {
     return {
       status: false,
-      reason: "FLOWKIRIM_TOKEN belum diisi",
-    };
-  }
-
-  if (!sessionId) {
-    return {
-      status: false,
-      reason: "FLOWKIRIM_SESSION_ID belum diisi",
+      reason: "FONNTE_TOKEN belum diisi",
     };
   }
 
   try {
+    const formData = new FormData();
+    formData.append("target", normalizeWaNumber(target));
+    formData.append("message", message);
+    formData.append("countryCode", "62");
+    formData.append("preview", "false");
+
     const response = await fetch(endpoint, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        Authorization: token,
       },
-      body: JSON.stringify({
-        session_id: sessionId,
-        to: toWhatsappJid(target),
-        message,
-      }),
+      body: formData,
     });
 
     const text = await response.text();
@@ -186,8 +173,10 @@ async function sendFlowKirim({ target, message }) {
       data = { raw: text };
     }
 
+    const fonnteSuccess = response.ok && data?.status === true;
+
     return {
-      status: response.ok,
+      status: fonnteSuccess,
       http_status: response.status,
       endpoint,
       response: data,
@@ -338,12 +327,11 @@ export async function GET(request) {
           no_wa: noWa,
           tenggat: effectiveTenggat,
           overdueMinutes,
-          flowkirim: {
+          fonnte: {
             status: true,
             dry_run: true,
             detail: "DRY_RUN aktif, pesan tidak benar-benar dikirim.",
-            target: [noWa],
-            to: toWhatsappJid(noWa),
+            target: normalizeWaNumber(noWa),
             message,
           },
         });
@@ -351,24 +339,25 @@ export async function GET(request) {
         continue;
       }
 
-      const flowKirimResult = await sendFlowKirim({
+      const fonnteResult = await sendFonnte({
         target: noWa,
         message,
       });
 
       results.push({
-        status: flowKirimResult.status ? "SENT" : "FAILED",
+        status: fonnteResult.status ? "SENT" : "FAILED",
         token,
         idbarang,
         no_wa: noWa,
         tenggat: effectiveTenggat,
         overdueMinutes,
-        flowkirim: flowKirimResult,
+        fonnte: fonnteResult,
       });
     }
 
     return Response.json({
       success: true,
+      gateway: "fonnte",
       dry_run: dryRun,
       checked_at: new Date().toISOString(),
       total_rows_checked: riwayatRows.length,
@@ -381,6 +370,7 @@ export async function GET(request) {
     return Response.json(
       {
         success: false,
+        gateway: "fonnte",
         error: String(error?.message || error),
       },
       { status: 500 }
