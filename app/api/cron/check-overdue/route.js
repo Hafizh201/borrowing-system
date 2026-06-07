@@ -1,7 +1,5 @@
 export const dynamic = "force-dynamic";
 
-const MINUTES_PER_DAY = 1440;
-
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -14,10 +12,7 @@ function parseDate(value) {
   const text = clean(value);
   if (!text) return null;
 
-  const match = text.match(
-    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/
-  );
-
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
   if (match) {
     return new Date(
       Number(match[1]),
@@ -30,9 +25,16 @@ function parseDate(value) {
   }
 
   const fallback = new Date(text);
-  if (Number.isNaN(fallback.getTime())) return null;
+  return Number.isNaN(fallback.getTime()) ? null : fallback;
+}
 
-  return fallback;
+function getJakartaDateKey(date = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Jakarta",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
 }
 
 function isPinjam(row) {
@@ -49,15 +51,8 @@ function getIdBarang(row) {
 
 function normalizeWaNumber(number) {
   let value = clean(number).replace(/\D/g, "");
-
-  if (value.startsWith("0")) {
-    value = "62" + value.slice(1);
-  }
-
-  if (!value.startsWith("62")) {
-    value = "62" + value;
-  }
-
+  if (value.startsWith("0")) value = "62" + value.slice(1);
+  if (!value.startsWith("62")) value = "62" + value;
   return value;
 }
 
@@ -65,23 +60,16 @@ function isReturnedAfter(riwayatRows, pinjamRow) {
   const idbarang = getIdBarang(pinjamRow);
   const token = clean(pinjamRow.extend_token);
   const waktuPinjam = parseDate(pinjamRow.waktu);
-
   if (!idbarang || !waktuPinjam) return false;
 
   return riwayatRows.some((row) => {
     if (!isKembali(row)) return false;
 
-    const rowIdBarang = getIdBarang(row);
-    const rowToken = clean(row.extend_token);
     const waktuKembali = parseDate(row.waktu);
-
     if (!waktuKembali) return false;
 
-    const sameToken = token && rowToken && token === rowToken;
-
-    const sameBarangAfter =
-      rowIdBarang === idbarang &&
-      waktuKembali.getTime() >= waktuPinjam.getTime();
+    const sameToken = token && clean(row.extend_token) && token === clean(row.extend_token);
+    const sameBarangAfter = getIdBarang(row) === idbarang && waktuKembali.getTime() >= waktuPinjam.getTime();
 
     return sameToken || sameBarangAfter;
   });
@@ -90,23 +78,19 @@ function isReturnedAfter(riwayatRows, pinjamRow) {
 function getLatestExtension(perpanjangRows, token) {
   const matches = perpanjangRows
     .filter((row) => clean(row.extend_token) === clean(token))
-    .map((row) => ({
-      ...row,
-      date: parseDate(row.tenggat_baru),
-    }))
+    .map((row) => ({ ...row, date: parseDate(row.tenggat_baru) }))
     .filter((row) => row.date);
 
   if (matches.length === 0) return null;
-
   matches.sort((a, b) => b.date.getTime() - a.date.getTime());
   return matches[0];
 }
 
-function getReminderKey({ token, effectiveTenggat, reminderKe }) {
-  return `${token}|${effectiveTenggat}|R${reminderKe}`;
+function getReminderKey({ token, effectiveTenggat, reminderDate }) {
+  return `${token}|${effectiveTenggat}|${reminderDate}`;
 }
 
-function hasReminderBeenSent(reminderRows, reminderKey) {
+function hasReminderBeenSentToday(reminderRows, reminderKey) {
   return reminderRows.some((row) => {
     const rowKey = clean(row.reminder_key || row.reminderkey);
     const rowStatus = upper(row.status);
@@ -114,42 +98,51 @@ function hasReminderBeenSent(reminderRows, reminderKey) {
   });
 }
 
-function buildMessage({ nama, idbarang, waktu, tenggat, link, reminderKe }) {
+function getReminderNumber(reminderRows, token, effectiveTenggat, reminderDate) {
+  const prefix = `${token}|${effectiveTenggat}|`;
+  const sentKeys = new Set();
+
+  for (const row of reminderRows) {
+    const rowKey = clean(row.reminder_key || row.reminderkey);
+    const rowStatus = upper(row.status);
+    if (rowKey.startsWith(prefix) && ["SENT", "DRY_RUN_SENT"].includes(rowStatus)) {
+      sentKeys.add(rowKey);
+    }
+  }
+
+  const todayKey = getReminderKey({ token, effectiveTenggat, reminderDate });
+  return sentKeys.has(todayKey) ? sentKeys.size : sentKeys.size + 1;
+}
+
+function buildMessage({ nama, idbarang, waktu, tenggat, link, reminderKe, reminderDate }) {
   const reminderLine =
     reminderKe > 1
       ? `Ini adalah pengingat ke-${reminderKe} karena barang belum tercatat dikembalikan atau diperpanjang.`
-      : `Ini adalah pengingat pertama karena barang sudah melewati batas pengembalian.`;
+      : "Ini adalah pengingat pertama karena barang sudah melewati batas pengembalian.";
 
   return [
     `Assalamu’alaikum, ${nama}.`,
-    ``,
+    "",
     `Barang dengan ID "${idbarang}" yang Anda pinjam pada ${waktu} belum tercatat dikembalikan.`,
     `Batas pengembalian barang adalah ${tenggat}.`,
-    ``,
+    "",
     reminderLine,
-    ``,
-    `Silakan segera mengembalikan barang, atau ajukan perpanjangan melalui link berikut:`,
-    ``,
+    `Tanggal reminder: ${reminderDate}.`,
+    "",
+    "Silakan segera mengembalikan barang, atau ajukan perpanjangan melalui link berikut:",
+    "",
     link,
-    ``,
-    `Terima kasih.`,
-    `Smart Borrowing System`,
+    "",
+    "Terima kasih.",
+    "Smart Borrowing System",
   ].join("\n");
 }
 
 async function fetchAppsScript(mode) {
   const baseUrl = process.env.APPS_SCRIPT_URL;
+  if (!baseUrl) throw new Error("APPS_SCRIPT_URL belum diisi di Environment Variables");
 
-  if (!baseUrl) {
-    throw new Error("APPS_SCRIPT_URL belum diisi di Environment Variables");
-  }
-
-  const url = `${baseUrl}?mode=${encodeURIComponent(mode)}`;
-
-  const response = await fetch(url, {
-    cache: "no-store",
-  });
-
+  const response = await fetch(`${baseUrl}?mode=${encodeURIComponent(mode)}`, { cache: "no-store" });
   const json = await response.json();
 
   if (!json.success && !json.ok) {
@@ -161,22 +154,16 @@ async function fetchAppsScript(mode) {
 
 async function postAppsScript(payload) {
   const baseUrl = process.env.APPS_SCRIPT_URL;
-
-  if (!baseUrl) {
-    throw new Error("APPS_SCRIPT_URL belum diisi di Environment Variables");
-  }
+  if (!baseUrl) throw new Error("APPS_SCRIPT_URL belum diisi di Environment Variables");
 
   const response = await fetch(baseUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     cache: "no-store",
   });
 
   const json = await response.json();
-
   if (!response.ok || (!json.success && !json.ok)) {
     throw new Error(`Apps Script POST gagal: ${JSON.stringify(json)}`);
   }
@@ -188,12 +175,7 @@ async function sendFonnte({ target, message }) {
   const token = process.env.FONNTE_TOKEN;
   const endpoint = process.env.FONNTE_API_URL || "https://api.fonnte.com/send";
 
-  if (!token) {
-    return {
-      status: false,
-      reason: "FONNTE_TOKEN belum diisi",
-    };
-  }
+  if (!token) return { status: false, reason: "FONNTE_TOKEN belum diisi" };
 
   try {
     const formData = new FormData();
@@ -204,14 +186,11 @@ async function sendFonnte({ target, message }) {
 
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        Authorization: token,
-      },
+      headers: { Authorization: token },
       body: formData,
     });
 
     const text = await response.text();
-
     let data;
     try {
       data = JSON.parse(text);
@@ -219,10 +198,8 @@ async function sendFonnte({ target, message }) {
       data = { raw: text };
     }
 
-    const fonnteSuccess = response.ok && data?.status === true;
-
     return {
-      status: fonnteSuccess,
+      status: response.ok && data?.status === true,
       http_status: response.status,
       endpoint,
       response: data,
@@ -237,18 +214,7 @@ async function sendFonnte({ target, message }) {
   }
 }
 
-async function logReminder({
-  token,
-  uidpeminjam,
-  nama,
-  kelas,
-  idbarang,
-  noWa,
-  reminderKey,
-  reminderKe,
-  effectiveTenggat,
-  status,
-}) {
+async function logReminder({ token, uidpeminjam, nama, kelas, idbarang, noWa, reminderKey, reminderKe, effectiveTenggat, status }) {
   const webKey = process.env.APPS_SCRIPT_WRITE_KEY || process.env.CRON_SECRET || "";
 
   return postAppsScript({
@@ -270,32 +236,24 @@ async function logReminder({
 export async function GET(request) {
   try {
     const requestUrl = new URL(request.url);
-
     const secret = requestUrl.searchParams.get("secret");
     const force = requestUrl.searchParams.get("force") === "true";
 
     if (secret !== process.env.CRON_SECRET) {
-      return Response.json(
-        {
-          success: false,
-          error: "Unauthorized cron request",
-        },
-        { status: 401 }
-      );
+      return Response.json({ success: false, error: "Unauthorized cron request" }, { status: 401 });
     }
 
     const dryRun = String(process.env.DRY_RUN || "true") === "true";
     const appUrl = process.env.APP_URL || "http://localhost:3000";
-
     const now = new Date();
+    const reminderDate = getJakartaDateKey(now);
 
-    const [dataRows, riwayatRows, perpanjangRows, reminderRows] =
-      await Promise.all([
-        fetchAppsScript("getdata"),
-        fetchAppsScript("getriwayat"),
-        fetchAppsScript("getperpanjang"),
-        fetchAppsScript("getreminder"),
-      ]);
+    const [dataRows, riwayatRows, perpanjangRows, reminderRows] = await Promise.all([
+      fetchAppsScript("getdata"),
+      fetchAppsScript("getriwayat"),
+      fetchAppsScript("getperpanjang"),
+      fetchAppsScript("getreminder"),
+    ]);
 
     const results = [];
 
@@ -311,74 +269,46 @@ export async function GET(request) {
       const rawTenggat = clean(row.Tenggat || row.tenggat);
 
       if (!idbarang || !token || !uidpeminjam || !rawTenggat) {
-        results.push({
-          status: "SKIP_INCOMPLETE",
-          token,
-          idbarang,
-          tenggat: rawTenggat,
-        });
+        results.push({ status: "SKIP_INCOMPLETE", token, idbarang, tenggat: rawTenggat });
         continue;
       }
 
       if (isReturnedAfter(riwayatRows, row)) {
-        results.push({
-          status: "SKIP_RETURNED",
-          token,
-          idbarang,
-          tenggat: "",
-        });
+        results.push({ status: "SKIP_RETURNED", token, idbarang, tenggat: "" });
         continue;
       }
 
       const latestExtension = getLatestExtension(perpanjangRows, token);
-
-      const effectiveTenggat = latestExtension
-        ? clean(latestExtension.tenggat_baru)
-        : rawTenggat;
-
+      const effectiveTenggat = latestExtension ? clean(latestExtension.tenggat_baru) : rawTenggat;
       const tenggatDate = parseDate(effectiveTenggat);
 
       if (!tenggatDate) {
-        results.push({
-          status: "SKIP_NO_TENGGAT",
-          token,
-          idbarang,
-          tenggat: effectiveTenggat,
-        });
+        results.push({ status: "SKIP_NO_TENGGAT", token, idbarang, tenggat: effectiveTenggat });
         continue;
       }
 
-      const overdueMinutes = Math.floor(
-        (now.getTime() - tenggatDate.getTime()) / 60000
-      );
-
+      const overdueMinutes = Math.floor((now.getTime() - tenggatDate.getTime()) / 60000);
       if (overdueMinutes < 0) {
-        results.push({
-          status: "SKIP_NOT_OVERDUE",
-          token,
-          idbarang,
-          tenggat: effectiveTenggat,
-          overdueMinutes,
-        });
+        results.push({ status: "SKIP_NOT_OVERDUE", token, idbarang, tenggat: effectiveTenggat, overdueMinutes });
         continue;
       }
 
-      const reminderKe = Math.floor(overdueMinutes / MINUTES_PER_DAY) + 1;
-      const reminderKey = getReminderKey({
-        token,
-        effectiveTenggat,
-        reminderKe,
-      });
+      const reminderKey = getReminderKey({ token, effectiveTenggat, reminderDate });
+      const reminderKe = getReminderNumber(reminderRows, token, effectiveTenggat, reminderDate);
 
-      if (!force && hasReminderBeenSent(reminderRows, reminderKey)) {
+      // Penting: force=true tidak boleh membypass checklist harian.
+      // 1 token hanya boleh mendapat maksimal 1 reminder per tanggal Jakarta.
+      if (hasReminderBeenSentToday(reminderRows, reminderKey)) {
         results.push({
-          status: "SKIP_ALREADY_SENT",
+          status: "SKIP_ALREADY_SENT_TODAY",
           token,
           idbarang,
           tenggat: effectiveTenggat,
           overdueMinutes,
+          reminder_date: reminderDate,
           reminder_ke: reminderKe,
           reminder_key: reminderKey,
+          force_ignored_for_daily_limit: force,
         });
         continue;
       }
@@ -387,27 +317,12 @@ export async function GET(request) {
       const noWa = clean(user?.no_wa);
 
       if (!noWa) {
-        results.push({
-          status: "SKIP_NO_WA",
-          token,
-          idbarang,
-          tenggat: effectiveTenggat,
-          reminder_ke: reminderKe,
-          reminder_key: reminderKey,
-        });
+        results.push({ status: "SKIP_NO_WA", token, idbarang, tenggat: effectiveTenggat, reminder_date: reminderDate, reminder_ke: reminderKe, reminder_key: reminderKey });
         continue;
       }
 
       const link = `${appUrl}/perpanjang?token=${encodeURIComponent(token)}`;
-
-      const message = buildMessage({
-        nama,
-        idbarang,
-        waktu,
-        tenggat: effectiveTenggat,
-        link,
-        reminderKe,
-      });
+      const message = buildMessage({ nama, idbarang, waktu, tenggat: effectiveTenggat, link, reminderKe, reminderDate });
 
       if (dryRun) {
         results.push({
@@ -417,24 +332,15 @@ export async function GET(request) {
           no_wa: noWa,
           tenggat: effectiveTenggat,
           overdueMinutes,
+          reminder_date: reminderDate,
           reminder_ke: reminderKe,
           reminder_key: reminderKey,
-          fonnte: {
-            status: true,
-            dry_run: true,
-            detail: "DRY_RUN aktif, pesan tidak benar-benar dikirim.",
-            target: normalizeWaNumber(noWa),
-            message,
-          },
+          fonnte: { status: true, dry_run: true, detail: "DRY_RUN aktif, pesan tidak benar-benar dikirim.", target: normalizeWaNumber(noWa), message },
         });
-
         continue;
       }
 
-      const fonnteResult = await sendFonnte({
-        target: noWa,
-        message,
-      });
+      const fonnteResult = await sendFonnte({ target: noWa, message });
 
       if (fonnteResult.status) {
         try {
@@ -458,6 +364,7 @@ export async function GET(request) {
             no_wa: noWa,
             tenggat: effectiveTenggat,
             overdueMinutes,
+            reminder_date: reminderDate,
             reminder_ke: reminderKe,
             reminder_key: reminderKey,
             fonnte: fonnteResult,
@@ -471,13 +378,13 @@ export async function GET(request) {
             no_wa: noWa,
             tenggat: effectiveTenggat,
             overdueMinutes,
+            reminder_date: reminderDate,
             reminder_ke: reminderKe,
             reminder_key: reminderKey,
             fonnte: fonnteResult,
             log_error: String(logError?.message || logError),
           });
         }
-
         continue;
       }
 
@@ -488,6 +395,7 @@ export async function GET(request) {
         no_wa: noWa,
         tenggat: effectiveTenggat,
         overdueMinutes,
+        reminder_date: reminderDate,
         reminder_ke: reminderKe,
         reminder_key: reminderKey,
         fonnte: fonnteResult,
@@ -498,6 +406,7 @@ export async function GET(request) {
       success: true,
       gateway: "fonnte",
       reminder_tracking: true,
+      reminder_limit: "max_one_message_per_token_per_jakarta_day",
       dry_run: dryRun,
       checked_at: new Date().toISOString(),
       total_rows_checked: riwayatRows.length,
@@ -506,15 +415,6 @@ export async function GET(request) {
     });
   } catch (error) {
     console.error(error);
-
-    return Response.json(
-      {
-        success: false,
-        gateway: "fonnte",
-        reminder_tracking: true,
-        error: String(error?.message || error),
-      },
-      { status: 500 }
-    );
+    return Response.json({ success: false, gateway: "fonnte", reminder_tracking: true, error: String(error?.message || error) }, { status: 500 });
   }
 }
