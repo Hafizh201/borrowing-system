@@ -1,8 +1,1 @@
-{
-  "crons": [
-    {
-      "path": "/api/cron/check-overdue?secret=ganti_rahasia_ini",
-      "schedule": "*/30 * * * *"
-    }
-  ]
-}
+
