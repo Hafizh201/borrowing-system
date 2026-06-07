@@ -87,7 +87,9 @@ function getLatestExtension(perpanjangRows, token) {
 }
 
 function getReminderKey({ token, effectiveTenggat, reminderDate }) {
-  return `${token}|${effectiveTenggat}|${reminderDate}`;
+  // Apps Script macro membersihkan karakter pipe (|) menjadi tanda minus (-),
+  // jadi key harus memakai format yang sama persis dengan yang tersimpan di Sheet.
+  return `${token}-${effectiveTenggat}-${reminderDate}`;
 }
 
 function hasReminderBeenSentToday(reminderRows, reminderKey) {
@@ -99,7 +101,7 @@ function hasReminderBeenSentToday(reminderRows, reminderKey) {
 }
 
 function getReminderNumber(reminderRows, token, effectiveTenggat, reminderDate) {
-  const prefix = `${token}|${effectiveTenggat}|`;
+  const prefix = `${token}-${effectiveTenggat}-`;
   const sentKeys = new Set();
 
   for (const row of reminderRows) {
