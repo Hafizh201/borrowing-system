@@ -1,5 +1,7 @@
 export const dynamic = "force-dynamic";
 
+const MINUTES_PER_DAY = 1440;
+
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -100,13 +102,32 @@ function getLatestExtension(perpanjangRows, token) {
   return matches[0];
 }
 
-function buildMessage({ nama, idbarang, waktu, tenggat, link }) {
+function getReminderKey({ token, effectiveTenggat, reminderKe }) {
+  return `${token}|${effectiveTenggat}|R${reminderKe}`;
+}
+
+function hasReminderBeenSent(reminderRows, reminderKey) {
+  return reminderRows.some((row) => {
+    const rowKey = clean(row.reminder_key || row.reminderkey);
+    const rowStatus = upper(row.status);
+    return rowKey === reminderKey && ["SENT", "DRY_RUN_SENT"].includes(rowStatus);
+  });
+}
+
+function buildMessage({ nama, idbarang, waktu, tenggat, link, reminderKe }) {
+  const reminderLine =
+    reminderKe > 1
+      ? `Ini adalah pengingat ke-${reminderKe} karena barang belum tercatat dikembalikan atau diperpanjang.`
+      : `Ini adalah pengingat pertama karena barang sudah melewati batas pengembalian.`;
+
   return [
     `Assalamu’alaikum, ${nama}.`,
     ``,
     `Barang dengan ID "${idbarang}" yang Anda pinjam pada ${waktu} belum tercatat dikembalikan.`,
-    ``,
     `Batas pengembalian barang adalah ${tenggat}.`,
+    ``,
+    reminderLine,
+    ``,
     `Silakan segera mengembalikan barang, atau ajukan perpanjangan melalui link berikut:`,
     ``,
     link,
@@ -136,6 +157,31 @@ async function fetchAppsScript(mode) {
   }
 
   return json.data || [];
+}
+
+async function postAppsScript(payload) {
+  const baseUrl = process.env.APPS_SCRIPT_URL;
+
+  if (!baseUrl) {
+    throw new Error("APPS_SCRIPT_URL belum diisi di Environment Variables");
+  }
+
+  const response = await fetch(baseUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+
+  const json = await response.json();
+
+  if (!response.ok || (!json.success && !json.ok)) {
+    throw new Error(`Apps Script POST gagal: ${JSON.stringify(json)}`);
+  }
+
+  return json;
 }
 
 async function sendFonnte({ target, message }) {
@@ -191,6 +237,36 @@ async function sendFonnte({ target, message }) {
   }
 }
 
+async function logReminder({
+  token,
+  uidpeminjam,
+  nama,
+  kelas,
+  idbarang,
+  noWa,
+  reminderKey,
+  reminderKe,
+  effectiveTenggat,
+  status,
+}) {
+  const webKey = process.env.APPS_SCRIPT_WRITE_KEY || process.env.CRON_SECRET || "";
+
+  return postAppsScript({
+    mode: "simpanreminder",
+    web_key: webKey,
+    extend_token: token,
+    uidpeminjam,
+    nama,
+    kelas,
+    Idbarang: idbarang,
+    no_wa: noWa,
+    reminder_key: reminderKey,
+    reminder_ke: String(reminderKe),
+    tenggat_dasar: effectiveTenggat,
+    status,
+  });
+}
+
 export async function GET(request) {
   try {
     const requestUrl = new URL(request.url);
@@ -209,16 +285,17 @@ export async function GET(request) {
     }
 
     const dryRun = String(process.env.DRY_RUN || "true") === "true";
-    const sendWindowMinutes = Number(process.env.SEND_WINDOW_MINUTES || 90);
     const appUrl = process.env.APP_URL || "http://localhost:3000";
 
     const now = new Date();
 
-    const [dataRows, riwayatRows, perpanjangRows] = await Promise.all([
-      fetchAppsScript("getdata"),
-      fetchAppsScript("getriwayat"),
-      fetchAppsScript("getperpanjang"),
-    ]);
+    const [dataRows, riwayatRows, perpanjangRows, reminderRows] =
+      await Promise.all([
+        fetchAppsScript("getdata"),
+        fetchAppsScript("getriwayat"),
+        fetchAppsScript("getperpanjang"),
+        fetchAppsScript("getreminder"),
+      ]);
 
     const results = [];
 
@@ -228,6 +305,7 @@ export async function GET(request) {
       const idbarang = getIdBarang(row);
       const token = clean(row.extend_token);
       const nama = clean(row.nama);
+      const kelas = clean(row.kelas);
       const uidpeminjam = clean(row.uidpeminjam);
       const waktu = clean(row.waktu);
       const rawTenggat = clean(row.Tenggat || row.tenggat);
@@ -285,13 +363,22 @@ export async function GET(request) {
         continue;
       }
 
-      if (!force && overdueMinutes > sendWindowMinutes) {
+      const reminderKe = Math.floor(overdueMinutes / MINUTES_PER_DAY) + 1;
+      const reminderKey = getReminderKey({
+        token,
+        effectiveTenggat,
+        reminderKe,
+      });
+
+      if (!force && hasReminderBeenSent(reminderRows, reminderKey)) {
         results.push({
-          status: "SKIP_OUTSIDE_SEND_WINDOW",
+          status: "SKIP_ALREADY_SENT",
           token,
           idbarang,
           tenggat: effectiveTenggat,
           overdueMinutes,
+          reminder_ke: reminderKe,
+          reminder_key: reminderKey,
         });
         continue;
       }
@@ -305,6 +392,8 @@ export async function GET(request) {
           token,
           idbarang,
           tenggat: effectiveTenggat,
+          reminder_ke: reminderKe,
+          reminder_key: reminderKey,
         });
         continue;
       }
@@ -317,6 +406,7 @@ export async function GET(request) {
         waktu,
         tenggat: effectiveTenggat,
         link,
+        reminderKe,
       });
 
       if (dryRun) {
@@ -327,6 +417,8 @@ export async function GET(request) {
           no_wa: noWa,
           tenggat: effectiveTenggat,
           overdueMinutes,
+          reminder_ke: reminderKe,
+          reminder_key: reminderKey,
           fonnte: {
             status: true,
             dry_run: true,
@@ -344,13 +436,60 @@ export async function GET(request) {
         message,
       });
 
+      if (fonnteResult.status) {
+        try {
+          const logResult = await logReminder({
+            token,
+            uidpeminjam,
+            nama,
+            kelas,
+            idbarang,
+            noWa,
+            reminderKey,
+            reminderKe,
+            effectiveTenggat,
+            status: "SENT",
+          });
+
+          results.push({
+            status: "SENT",
+            token,
+            idbarang,
+            no_wa: noWa,
+            tenggat: effectiveTenggat,
+            overdueMinutes,
+            reminder_ke: reminderKe,
+            reminder_key: reminderKey,
+            fonnte: fonnteResult,
+            reminder_log: logResult,
+          });
+        } catch (logError) {
+          results.push({
+            status: "SENT_LOG_FAILED",
+            token,
+            idbarang,
+            no_wa: noWa,
+            tenggat: effectiveTenggat,
+            overdueMinutes,
+            reminder_ke: reminderKe,
+            reminder_key: reminderKey,
+            fonnte: fonnteResult,
+            log_error: String(logError?.message || logError),
+          });
+        }
+
+        continue;
+      }
+
       results.push({
-        status: fonnteResult.status ? "SENT" : "FAILED",
+        status: "FAILED",
         token,
         idbarang,
         no_wa: noWa,
         tenggat: effectiveTenggat,
         overdueMinutes,
+        reminder_ke: reminderKe,
+        reminder_key: reminderKey,
         fonnte: fonnteResult,
       });
     }
@@ -358,6 +497,7 @@ export async function GET(request) {
     return Response.json({
       success: true,
       gateway: "fonnte",
+      reminder_tracking: true,
       dry_run: dryRun,
       checked_at: new Date().toISOString(),
       total_rows_checked: riwayatRows.length,
@@ -371,6 +511,7 @@ export async function GET(request) {
       {
         success: false,
         gateway: "fonnte",
+        reminder_tracking: true,
         error: String(error?.message || error),
       },
       { status: 500 }
