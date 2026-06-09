@@ -63,6 +63,7 @@ function nowString() {
 export default function PerpanjangForm({ loan, token }) {
   const [tambahHari, setTambahHari] = useState(1);
   const [alasan, setAlasan] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const waktuPerpanjang = useMemo(() => nowString(), []);
 
@@ -80,8 +81,22 @@ export default function PerpanjangForm({ loan, token }) {
     setTambahHari(safe);
   }
 
+  function handleSubmit(event) {
+    if (isSubmitting) {
+      event.preventDefault();
+      return;
+    }
+
+    setIsSubmitting(true);
+  }
+
   return (
-    <form className="form detail-form" action="/api/perpanjang" method="POST">
+    <form
+      className="form detail-form"
+      action="/api/perpanjang"
+      method="POST"
+      onSubmit={handleSubmit}
+    >
       <input type="hidden" name="extend_token" value={token} />
       <input type="hidden" name="tambah_hari" value={tambahHari} />
 
@@ -155,6 +170,7 @@ export default function PerpanjangForm({ loan, token }) {
             max="30"
             value={tambahHari}
             onChange={handleTambahHariChange}
+            disabled={isSubmitting}
           />
         </div>
 
@@ -179,12 +195,19 @@ export default function PerpanjangForm({ loan, token }) {
           value={alasan}
           onChange={(event) => setAlasan(event.target.value)}
           placeholder="Contoh: Masih digunakan untuk dokumentasi kegiatan sekolah."
+          disabled={isSubmitting}
         />
       </div>
 
-      <button className="button" type="submit">
-        Ya, Perpanjang
+      <button className="button" type="submit" disabled={isSubmitting}>
+        {isSubmitting ? "Sedang memproses..." : "Ya, Perpanjang"}
       </button>
+
+      {isSubmitting && (
+        <p className="small muted">
+          Mohon tunggu, data sedang dikirim. Jangan tutup halaman ini.
+        </p>
+      )}
     </form>
   );
 }
