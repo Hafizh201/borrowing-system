@@ -1,5 +1,8 @@
 export const dynamic = "force-dynamic";
 
+const JAKARTA_UTC_OFFSET_HOURS = 7;
+const DEFAULT_REMINDER_WINDOW_MINUTES = 60;
+
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -8,33 +11,78 @@ function upper(value) {
   return clean(value).toUpperCase();
 }
 
-function parseDate(value) {
-  const text = clean(value);
-  if (!text) return null;
-
-  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
-  if (match) {
-    return new Date(
-      Number(match[1]),
-      Number(match[2]) - 1,
-      Number(match[3]),
-      Number(match[4]),
-      Number(match[5]),
-      Number(match[6] || 0)
-    );
-  }
-
-  const fallback = new Date(text);
-  return Number.isNaN(fallback.getTime()) ? null : fallback;
+function pad(number) {
+  return String(number).padStart(2, "0");
 }
 
-function getJakartaDateKey(date = new Date()) {
-  return new Intl.DateTimeFormat("en-CA", {
+function formatDateKey({ year, month, day }) {
+  return `${year}-${pad(month)}-${pad(day)}`;
+}
+
+function getJakartaParts(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Jakarta",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(date);
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+
+  const parts = Object.fromEntries(
+    formatter.formatToParts(date).map((part) => [part.type, part.value])
+  );
+
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
+}
+
+function parseDateParts(value) {
+  const text = clean(value);
+  if (!text) return null;
+
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4]),
+    minute: Number(match[5]),
+    second: Number(match[6] || 0),
+  };
+}
+
+function jakartaPartsToDate(parts) {
+  if (!parts) return null;
+
+  return new Date(
+    Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour) - JAKARTA_UTC_OFFSET_HOURS,
+      Number(parts.minute || 0),
+      Number(parts.second || 0)
+    )
+  );
+}
+
+function parseDate(value) {
+  const parts = parseDateParts(value);
+  if (parts) return jakartaPartsToDate(parts);
+
+  const fallback = new Date(clean(value));
+  return Number.isNaN(fallback.getTime()) ? null : fallback;
 }
 
 function isPinjam(row) {
@@ -68,7 +116,8 @@ function isReturnedAfter(riwayatRows, pinjamRow) {
     const waktuKembali = parseDate(row.waktu);
     if (!waktuKembali) return false;
 
-    const sameToken = token && clean(row.extend_token) && token === clean(row.extend_token);
+    const rowToken = clean(row.extend_token);
+    const sameToken = token && rowToken && token === rowToken;
     const sameBarangAfter = getIdBarang(row) === idbarang && waktuKembali.getTime() >= waktuPinjam.getTime();
 
     return sameToken || sameBarangAfter;
@@ -87,8 +136,6 @@ function getLatestExtension(perpanjangRows, token) {
 }
 
 function getReminderKey({ token, effectiveTenggat, reminderDate }) {
-  // Apps Script macro membersihkan karakter pipe (|) menjadi tanda minus (-),
-  // jadi key harus memakai format yang sama persis dengan yang tersimpan di Sheet.
   return `${token}-${effectiveTenggat}-${reminderDate}`;
 }
 
@@ -116,7 +163,29 @@ function getReminderNumber(reminderRows, token, effectiveTenggat, reminderDate) 
   return sentKeys.has(todayKey) ? sentKeys.size : sentKeys.size + 1;
 }
 
-function buildMessage({ nama, idbarang, waktu, tenggat, link, reminderKe, reminderDate }) {
+function getDailyReminderSlot({ effectiveTenggat, now }) {
+  const tenggatParts = parseDateParts(effectiveTenggat);
+  if (!tenggatParts) return null;
+
+  const nowJakarta = getJakartaParts(now);
+  const reminderDate = formatDateKey(nowJakarta);
+  const slotDate = jakartaPartsToDate({
+    year: nowJakarta.year,
+    month: nowJakarta.month,
+    day: nowJakarta.day,
+    hour: tenggatParts.hour,
+    minute: tenggatParts.minute,
+    second: tenggatParts.second,
+  });
+
+  return {
+    reminderDate,
+    slotDate,
+    slotTime: `${pad(tenggatParts.hour)}:${pad(tenggatParts.minute)}:${pad(tenggatParts.second)}`,
+  };
+}
+
+function buildMessage({ nama, idbarang, waktu, tenggat, link, reminderKe, reminderDate, slotTime }) {
   const reminderLine =
     reminderKe > 1
       ? `Ini adalah pengingat ke-${reminderKe} karena barang belum tercatat dikembalikan atau diperpanjang.`
@@ -129,7 +198,7 @@ function buildMessage({ nama, idbarang, waktu, tenggat, link, reminderKe, remind
     `Batas pengembalian barang adalah ${tenggat}.`,
     "",
     reminderLine,
-    `Tanggal reminder: ${reminderDate}.`,
+    `Reminder dikirim pada tanggal ${reminderDate}, sekitar jam tenggat ${slotTime}.`,
     "",
     "Silakan segera mengembalikan barang, atau ajukan perpanjangan melalui link berikut:",
     "",
@@ -247,8 +316,8 @@ export async function GET(request) {
 
     const dryRun = String(process.env.DRY_RUN || "true") === "true";
     const appUrl = process.env.APP_URL || "http://localhost:3000";
+    const reminderWindowMinutes = Number(process.env.REMINDER_WINDOW_MINUTES || DEFAULT_REMINDER_WINDOW_MINUTES);
     const now = new Date();
-    const reminderDate = getJakartaDateKey(now);
 
     const [dataRows, riwayatRows, perpanjangRows, reminderRows] = await Promise.all([
       fetchAppsScript("getdata"),
@@ -295,11 +364,46 @@ export async function GET(request) {
         continue;
       }
 
-      const reminderKey = getReminderKey({ token, effectiveTenggat, reminderDate });
-      const reminderKe = getReminderNumber(reminderRows, token, effectiveTenggat, reminderDate);
+      const dailySlot = getDailyReminderSlot({ effectiveTenggat, now });
+      if (!dailySlot || !dailySlot.slotDate) {
+        results.push({ status: "SKIP_NO_REMINDER_SLOT", token, idbarang, tenggat: effectiveTenggat });
+        continue;
+      }
 
-      // Penting: force=true tidak boleh membypass checklist harian.
-      // 1 token hanya boleh mendapat maksimal 1 reminder per tanggal Jakarta.
+      const minutesFromDailySlot = Math.floor((now.getTime() - dailySlot.slotDate.getTime()) / 60000);
+
+      if (minutesFromDailySlot < 0) {
+        results.push({
+          status: "SKIP_WAITING_FOR_TENGGAT_HOUR",
+          token,
+          idbarang,
+          tenggat: effectiveTenggat,
+          overdueMinutes,
+          reminder_date: dailySlot.reminderDate,
+          slot_time: dailySlot.slotTime,
+          minutes_until_slot: Math.abs(minutesFromDailySlot),
+        });
+        continue;
+      }
+
+      if (minutesFromDailySlot > reminderWindowMinutes) {
+        results.push({
+          status: "SKIP_OUTSIDE_TENGGAT_WINDOW",
+          token,
+          idbarang,
+          tenggat: effectiveTenggat,
+          overdueMinutes,
+          reminder_date: dailySlot.reminderDate,
+          slot_time: dailySlot.slotTime,
+          minutes_from_slot: minutesFromDailySlot,
+          reminder_window_minutes: reminderWindowMinutes,
+        });
+        continue;
+      }
+
+      const reminderKey = getReminderKey({ token, effectiveTenggat, reminderDate: dailySlot.reminderDate });
+      const reminderKe = getReminderNumber(reminderRows, token, effectiveTenggat, dailySlot.reminderDate);
+
       if (hasReminderBeenSentToday(reminderRows, reminderKey)) {
         results.push({
           status: "SKIP_ALREADY_SENT_TODAY",
@@ -307,9 +411,10 @@ export async function GET(request) {
           idbarang,
           tenggat: effectiveTenggat,
           overdueMinutes,
-          reminder_date: reminderDate,
+          reminder_date: dailySlot.reminderDate,
           reminder_ke: reminderKe,
           reminder_key: reminderKey,
+          slot_time: dailySlot.slotTime,
           force_ignored_for_daily_limit: force,
         });
         continue;
@@ -319,12 +424,12 @@ export async function GET(request) {
       const noWa = clean(user?.no_wa);
 
       if (!noWa) {
-        results.push({ status: "SKIP_NO_WA", token, idbarang, tenggat: effectiveTenggat, reminder_date: reminderDate, reminder_ke: reminderKe, reminder_key: reminderKey });
+        results.push({ status: "SKIP_NO_WA", token, idbarang, tenggat: effectiveTenggat, reminder_date: dailySlot.reminderDate, reminder_ke: reminderKe, reminder_key: reminderKey, slot_time: dailySlot.slotTime });
         continue;
       }
 
       const link = `${appUrl}/perpanjang?token=${encodeURIComponent(token)}`;
-      const message = buildMessage({ nama, idbarang, waktu, tenggat: effectiveTenggat, link, reminderKe, reminderDate });
+      const message = buildMessage({ nama, idbarang, waktu, tenggat: effectiveTenggat, link, reminderKe, reminderDate: dailySlot.reminderDate, slotTime: dailySlot.slotTime });
 
       if (dryRun) {
         results.push({
@@ -334,9 +439,11 @@ export async function GET(request) {
           no_wa: noWa,
           tenggat: effectiveTenggat,
           overdueMinutes,
-          reminder_date: reminderDate,
+          reminder_date: dailySlot.reminderDate,
           reminder_ke: reminderKe,
           reminder_key: reminderKey,
+          slot_time: dailySlot.slotTime,
+          minutes_from_slot: minutesFromDailySlot,
           fonnte: { status: true, dry_run: true, detail: "DRY_RUN aktif, pesan tidak benar-benar dikirim.", target: normalizeWaNumber(noWa), message },
         });
         continue;
@@ -346,18 +453,7 @@ export async function GET(request) {
 
       if (fonnteResult.status) {
         try {
-          const logResult = await logReminder({
-            token,
-            uidpeminjam,
-            nama,
-            kelas,
-            idbarang,
-            noWa,
-            reminderKey,
-            reminderKe,
-            effectiveTenggat,
-            status: "SENT",
-          });
+          const logResult = await logReminder({ token, uidpeminjam, nama, kelas, idbarang, noWa, reminderKey, reminderKe, effectiveTenggat, status: "SENT" });
 
           results.push({
             status: "SENT",
@@ -366,9 +462,11 @@ export async function GET(request) {
             no_wa: noWa,
             tenggat: effectiveTenggat,
             overdueMinutes,
-            reminder_date: reminderDate,
+            reminder_date: dailySlot.reminderDate,
             reminder_ke: reminderKe,
             reminder_key: reminderKey,
+            slot_time: dailySlot.slotTime,
+            minutes_from_slot: minutesFromDailySlot,
             fonnte: fonnteResult,
             reminder_log: logResult,
           });
@@ -380,9 +478,11 @@ export async function GET(request) {
             no_wa: noWa,
             tenggat: effectiveTenggat,
             overdueMinutes,
-            reminder_date: reminderDate,
+            reminder_date: dailySlot.reminderDate,
             reminder_ke: reminderKe,
             reminder_key: reminderKey,
+            slot_time: dailySlot.slotTime,
+            minutes_from_slot: minutesFromDailySlot,
             fonnte: fonnteResult,
             log_error: String(logError?.message || logError),
           });
@@ -397,9 +497,11 @@ export async function GET(request) {
         no_wa: noWa,
         tenggat: effectiveTenggat,
         overdueMinutes,
-        reminder_date: reminderDate,
+        reminder_date: dailySlot.reminderDate,
         reminder_ke: reminderKe,
         reminder_key: reminderKey,
+        slot_time: dailySlot.slotTime,
+        minutes_from_slot: minutesFromDailySlot,
         fonnte: fonnteResult,
       });
     }
@@ -409,6 +511,8 @@ export async function GET(request) {
       gateway: "fonnte",
       reminder_tracking: true,
       reminder_limit: "max_one_message_per_token_per_jakarta_day",
+      reminder_window: `only_send_between_tenggat_and_plus_${reminderWindowMinutes}_minutes`,
+      active_tenggat_source: "latest_perpanjang_if_exists_else_riwayat",
       dry_run: dryRun,
       checked_at: new Date().toISOString(),
       total_rows_checked: riwayatRows.length,
