@@ -97,6 +97,12 @@ function getIdBarang(row) {
   return clean(row.Idbarang || row.idbarang || row.uidbarang);
 }
 
+function getBarangName(barangRows, idbarang) {
+  const item = barangRows.find((row) => clean(row.uidbarang) === clean(idbarang));
+  const namaBarang = clean(item?.namabarang || item?.nama_barang || item?.NamaBarang || item?.nama);
+  return namaBarang || "Barang terdaftar";
+}
+
 function normalizeWaNumber(number) {
   let value = clean(number).replace(/\D/g, "");
   if (value.startsWith("0")) value = "62" + value.slice(1);
@@ -185,7 +191,7 @@ function getDailyReminderSlot({ effectiveTenggat, now }) {
   };
 }
 
-function buildMessage({ nama, idbarang, waktu, tenggat, link, reminderKe, reminderDate, slotTime }) {
+function buildMessage({ nama, namaBarang, waktu, tenggat, link, reminderKe, reminderDate, slotTime }) {
   const reminderLine =
     reminderKe > 1
       ? `Ini adalah pengingat ke-${reminderKe} karena barang belum tercatat dikembalikan atau diperpanjang.`
@@ -194,7 +200,7 @@ function buildMessage({ nama, idbarang, waktu, tenggat, link, reminderKe, remind
   return [
     `Assalamu’alaikum, ${nama}.`,
     "",
-    `Barang dengan ID "${idbarang}" yang Anda pinjam pada ${waktu} belum tercatat dikembalikan.`,
+    `Barang "${namaBarang}" yang Anda pinjam pada ${waktu} belum tercatat dikembalikan.`,
     `Batas pengembalian barang adalah ${tenggat}.`,
     "",
     reminderLine,
@@ -319,8 +325,9 @@ export async function GET(request) {
     const reminderWindowMinutes = Number(process.env.REMINDER_WINDOW_MINUTES || DEFAULT_REMINDER_WINDOW_MINUTES);
     const now = new Date();
 
-    const [dataRows, riwayatRows, perpanjangRows, reminderRows] = await Promise.all([
+    const [dataRows, barangRows, riwayatRows, perpanjangRows, reminderRows] = await Promise.all([
       fetchAppsScript("getdata"),
+      fetchAppsScript("getbarang"),
       fetchAppsScript("getriwayat"),
       fetchAppsScript("getperpanjang"),
       fetchAppsScript("getreminder"),
@@ -332,6 +339,7 @@ export async function GET(request) {
       if (!isPinjam(row)) continue;
 
       const idbarang = getIdBarang(row);
+      const namaBarang = getBarangName(barangRows, idbarang);
       const token = clean(row.extend_token);
       const nama = clean(row.nama);
       const kelas = clean(row.kelas);
@@ -340,12 +348,12 @@ export async function GET(request) {
       const rawTenggat = clean(row.Tenggat || row.tenggat);
 
       if (!idbarang || !token || !uidpeminjam || !rawTenggat) {
-        results.push({ status: "SKIP_INCOMPLETE", token, idbarang, tenggat: rawTenggat });
+        results.push({ status: "SKIP_INCOMPLETE", token, idbarang, namabarang: namaBarang, tenggat: rawTenggat });
         continue;
       }
 
       if (isReturnedAfter(riwayatRows, row)) {
-        results.push({ status: "SKIP_RETURNED", token, idbarang, tenggat: "" });
+        results.push({ status: "SKIP_RETURNED", token, idbarang, namabarang: namaBarang, tenggat: "" });
         continue;
       }
 
@@ -354,19 +362,19 @@ export async function GET(request) {
       const tenggatDate = parseDate(effectiveTenggat);
 
       if (!tenggatDate) {
-        results.push({ status: "SKIP_NO_TENGGAT", token, idbarang, tenggat: effectiveTenggat });
+        results.push({ status: "SKIP_NO_TENGGAT", token, idbarang, namabarang: namaBarang, tenggat: effectiveTenggat });
         continue;
       }
 
       const overdueMinutes = Math.floor((now.getTime() - tenggatDate.getTime()) / 60000);
       if (overdueMinutes < 0) {
-        results.push({ status: "SKIP_NOT_OVERDUE", token, idbarang, tenggat: effectiveTenggat, overdueMinutes });
+        results.push({ status: "SKIP_NOT_OVERDUE", token, idbarang, namabarang: namaBarang, tenggat: effectiveTenggat, overdueMinutes });
         continue;
       }
 
       const dailySlot = getDailyReminderSlot({ effectiveTenggat, now });
       if (!dailySlot || !dailySlot.slotDate) {
-        results.push({ status: "SKIP_NO_REMINDER_SLOT", token, idbarang, tenggat: effectiveTenggat });
+        results.push({ status: "SKIP_NO_REMINDER_SLOT", token, idbarang, namabarang: namaBarang, tenggat: effectiveTenggat });
         continue;
       }
 
@@ -377,6 +385,7 @@ export async function GET(request) {
           status: "SKIP_WAITING_FOR_TENGGAT_HOUR",
           token,
           idbarang,
+          namabarang: namaBarang,
           tenggat: effectiveTenggat,
           overdueMinutes,
           reminder_date: dailySlot.reminderDate,
@@ -391,6 +400,7 @@ export async function GET(request) {
           status: "SKIP_OUTSIDE_TENGGAT_WINDOW",
           token,
           idbarang,
+          namabarang: namaBarang,
           tenggat: effectiveTenggat,
           overdueMinutes,
           reminder_date: dailySlot.reminderDate,
@@ -409,6 +419,7 @@ export async function GET(request) {
           status: "SKIP_ALREADY_SENT_TODAY",
           token,
           idbarang,
+          namabarang: namaBarang,
           tenggat: effectiveTenggat,
           overdueMinutes,
           reminder_date: dailySlot.reminderDate,
@@ -424,18 +435,19 @@ export async function GET(request) {
       const noWa = clean(user?.no_wa);
 
       if (!noWa) {
-        results.push({ status: "SKIP_NO_WA", token, idbarang, tenggat: effectiveTenggat, reminder_date: dailySlot.reminderDate, reminder_ke: reminderKe, reminder_key: reminderKey, slot_time: dailySlot.slotTime });
+        results.push({ status: "SKIP_NO_WA", token, idbarang, namabarang: namaBarang, tenggat: effectiveTenggat, reminder_date: dailySlot.reminderDate, reminder_ke: reminderKe, reminder_key: reminderKey, slot_time: dailySlot.slotTime });
         continue;
       }
 
       const link = `${appUrl}/perpanjang?token=${encodeURIComponent(token)}`;
-      const message = buildMessage({ nama, idbarang, waktu, tenggat: effectiveTenggat, link, reminderKe, reminderDate: dailySlot.reminderDate, slotTime: dailySlot.slotTime });
+      const message = buildMessage({ nama, namaBarang, waktu, tenggat: effectiveTenggat, link, reminderKe, reminderDate: dailySlot.reminderDate, slotTime: dailySlot.slotTime });
 
       if (dryRun) {
         results.push({
           status: "DRY_RUN_SENT",
           token,
           idbarang,
+          namabarang: namaBarang,
           no_wa: noWa,
           tenggat: effectiveTenggat,
           overdueMinutes,
@@ -459,6 +471,7 @@ export async function GET(request) {
             status: "SENT",
             token,
             idbarang,
+            namabarang: namaBarang,
             no_wa: noWa,
             tenggat: effectiveTenggat,
             overdueMinutes,
@@ -475,6 +488,7 @@ export async function GET(request) {
             status: "SENT_LOG_FAILED",
             token,
             idbarang,
+            namabarang: namaBarang,
             no_wa: noWa,
             tenggat: effectiveTenggat,
             overdueMinutes,
@@ -494,6 +508,7 @@ export async function GET(request) {
         status: "FAILED",
         token,
         idbarang,
+        namabarang: namaBarang,
         no_wa: noWa,
         tenggat: effectiveTenggat,
         overdueMinutes,
@@ -510,6 +525,7 @@ export async function GET(request) {
       success: true,
       gateway: "fonnte",
       reminder_tracking: true,
+      reminder_message: "notifications_use_names_not_uids",
       reminder_limit: "max_one_message_per_token_per_jakarta_day",
       reminder_window: `only_send_between_tenggat_and_plus_${reminderWindowMinutes}_minutes`,
       active_tenggat_source: "latest_perpanjang_if_exists_else_riwayat",
