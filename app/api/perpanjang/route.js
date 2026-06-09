@@ -10,6 +10,12 @@ function getIdBarang(row) {
   return clean(row.Idbarang || row.idbarang || row.uidbarang);
 }
 
+function getBarangName(barangRows, idbarang) {
+  const item = barangRows.find((row) => clean(row.uidbarang) === clean(idbarang));
+  const namaBarang = clean(item?.namabarang || item?.nama_barang || item?.NamaBarang || item?.nama);
+  return namaBarang || "Barang terdaftar";
+}
+
 function normalizeWaNumber(number) {
   let value = clean(number).replace(/\D/g, "");
 
@@ -97,7 +103,7 @@ async function sendFonnte({ target, message }) {
 
 function buildPerpanjangSuccessMessage({
   nama,
-  idbarang,
+  namaBarang,
   tambahHari,
   tenggatLama,
   tenggatBaru,
@@ -105,7 +111,7 @@ function buildPerpanjangSuccessMessage({
   return [
     `Assalamu’alaikum, ${nama}.`,
     "",
-    `Perpanjangan peminjaman barang dengan ID "${idbarang}" berhasil tercatat di sistem.`,
+    `Perpanjangan peminjaman barang "${namaBarang}" berhasil tercatat di sistem.`,
     "",
     `Tambahan waktu: ${tambahHari} hari.`,
     `Tenggat lama: ${tenggatLama}.`,
@@ -119,8 +125,9 @@ function buildPerpanjangSuccessMessage({
 }
 
 async function sendPerpanjangNotification({ extendToken, tambahHari, result }) {
-  const [dataRows, riwayatRows] = await Promise.all([
+  const [dataRows, barangRows, riwayatRows] = await Promise.all([
     fetchAppsScript("getdata"),
+    fetchAppsScript("getbarang"),
     fetchAppsScript("getriwayat"),
   ]);
 
@@ -151,10 +158,11 @@ async function sendPerpanjangNotification({ extendToken, tambahHari, result }) {
 
   const tenggatLama = clean(result?.tenggat_lama || result?.data?.tenggat_lama);
   const tenggatBaru = clean(result?.tenggat_baru || result?.data?.tenggat_baru);
+  const namaBarang = getBarangName(barangRows, getIdBarang(pinjamRow));
 
   const message = buildPerpanjangSuccessMessage({
     nama: clean(pinjamRow.nama),
-    idbarang: getIdBarang(pinjamRow),
+    namaBarang,
     tambahHari,
     tenggatLama,
     tenggatBaru,
@@ -168,6 +176,7 @@ async function sendPerpanjangNotification({ extendToken, tambahHari, result }) {
   return {
     status: fonnte.status,
     no_wa: noWa,
+    namabarang: namaBarang,
     fonnte,
   };
 }
